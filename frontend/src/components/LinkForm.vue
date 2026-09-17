@@ -27,12 +27,12 @@
       <el-form-item label="分类">
         <el-select v-model="form.category_id" placeholder="选择分类" clearable style="width: 100%">
           <el-option
-            v-for="cat in linksStore.categories"
+            v-for="cat in categoryOptions"
             :key="cat.id"
-            :label="cat.name"
+            :label="categoryLabel(cat)"
             :value="cat.id"
           >
-            <span>
+            <span :style="{ paddingLeft: cat.depth * 14 + 'px' }">
               <el-tag :color="cat.color" effect="dark" size="small" style="margin-right: 8px">
                 &nbsp;
               </el-tag>
@@ -78,6 +78,7 @@
 import { ref, reactive, watch, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useLinksStore } from '../stores/links'
+import { buildCategoryTree } from '../utils/category-tree'
 
 const props = defineProps({
   visible: Boolean,
@@ -91,6 +92,11 @@ const formRef = ref(null)
 const saving = ref(false)
 
 const isEdit = computed(() => !!props.link?.id)
+
+const categoryOptions = computed(() => buildCategoryTree(linksStore.categories))
+function categoryLabel(cat) {
+  return cat.depth > 0 ? `${'　'.repeat(cat.depth)}${cat.name}` : cat.name
+}
 
 const form = reactive({
   url: '',

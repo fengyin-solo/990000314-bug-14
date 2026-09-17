@@ -1,6 +1,8 @@
 const express = require('express');
 const { getDb } = require('../db/init');
 const { authMiddleware } = require('../middleware/auth');
+const { normalizeUrl } = require('../utils/bookmark-parser');
+const { collectSubtree } = require('../utils/category-tree');
 
 const router = express.Router();
 
@@ -19,8 +21,12 @@ router.get('/', (req, res) => {
   let params = [userId];
 
   if (category) {
-    whereConditions.push('l.category_id = ?');
-    params.push(category);
+    // A parent folder contains its subfolders' links, as in the bookmark
+    // manager the file was imported from.
+    const subtreeIds = collectSubtree(db, userId, category);
+    const placeholders = subtreeIds.map(() => '?').join(',');
+    whereConditions.push(`l.category_id IN (${placeholders})`);
+    params.push(...subtreeIds);
   }
 
   if (search) {
@@ -78,11 +84,31 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: 'URL and title are required' });
   }
 
+  const normalized = normalizeUrl(url);
+  if (!normalized) {
+    return res.status(400).json({ error: '请输入有效的 http/https 网址' });
+  }
+
   const db = getDb();
 
-  const result = db.prepare(
-    'INSERT INTO links (user_id, url, title, description, category_id, status, is_read_later, review_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(userId, url, title, description || '', category_id || null, 'unchecked', is_read_later ? 1 : 0, review_date || null);
+  const duplicate = db
+    .prepare('SELECT id FROM links WHERE user_id = ? AND normalized_url = ?')
+    .get(userId, normalized);
+  if (duplicate) {
+    return res.status(409).json({ error: '该网址（忽略大小写、末尾斜杠等差异后）已存在' });
+  }
+
+  let result;
+  try {
+    result = db.prepare(
+      'INSERT INTO links (user_id, url, normalized_url, title, description, category_id, status, is_read_later, review_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(userId, url, normalized, title, description || '', category_id || null, 'unchecked', is_read_later ? 1 : 0, review_date || null);
+  } catch (err) {
+    if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return res.status(409).json({ error: '该网址（忽略大小写、末尾斜杠等差异后）已存在' });
+    }
+    throw err;
+  }
 
   const linkId = result.lastInsertRowid;
 
@@ -310,21 +336,42 @@ router.put('/:id', (req, res) => {
     return res.status(404).json({ error: 'Link not found' });
   }
 
+  const nextUrl = url || link.url;
+  const normalized = normalizeUrl(nextUrl);
+  if (!normalized) {
+    return res.status(400).json({ error: '请输入有效的 http/https 网址' });
+  }
+
+  const duplicate = db
+    .prepare('SELECT id FROM links WHERE user_id = ? AND normalized_url = ? AND id != ?')
+    .get(userId, normalized, id);
+  if (duplicate) {
+    return res.status(409).json({ error: '该网址（忽略大小写、末尾斜杠等差异后）已存在' });
+  }
+
   // Update link
-  db.prepare(`
+  try {
+    db.prepare(`
     UPDATE links
-    SET url = ?, title = ?, description = ?, category_id = ?, is_read_later = ?, review_date = ?, review_status = ?
+    SET url = ?, normalized_url = ?, title = ?, description = ?, category_id = ?, is_read_later = ?, review_date = ?, review_status = ?
     WHERE id = ?
   `).run(
-    url || link.url, 
-    title || link.title, 
-    description ?? link.description, 
-    category_id ?? link.category_id,
-    is_read_later !== undefined ? (is_read_later ? 1 : 0) : link.is_read_later,
-    review_date !== undefined ? review_date : link.review_date,
-    review_status || link.review_status,
-    id
-  );
+      nextUrl,
+      normalized,
+      title || link.title,
+      description ?? link.description,
+      category_id ?? link.category_id,
+      is_read_later !== undefined ? (is_read_later ? 1 : 0) : link.is_read_later,
+      review_date !== undefined ? review_date : link.review_date,
+      review_status || link.review_status,
+      id
+    );
+  } catch (err) {
+    if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return res.status(409).json({ error: '该网址（忽略大小写、末尾斜杠等差异后）已存在' });
+    }
+    throw err;
+  }
 
   // Update tags if provided
   if (tags !== undefined) {

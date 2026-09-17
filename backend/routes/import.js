@@ -10,66 +10,193 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 
 // All routes require authentication
 router.use(authMiddleware);
 
-// POST /api/import/bookmarks - Import Chrome bookmarks
-router.post('/bookmarks', upload.single('file'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded' });
-  }
+const FALLBACK_COLORS = ['#409EFF', '#67C23A', '#E6A23C', '#F56C6C', '#909399', '#9B59B6', '#1ABC9C', '#E74C3C'];
 
-  const html = req.file.buffer.toString('utf-8');
-  const bookmarks = parseBookmarks(html);
-
-  if (bookmarks.length === 0) {
-    return res.status(400).json({ error: 'No valid bookmarks found in the file' });
-  }
-
-  const db = getDb();
-  const userId = req.userId;
-
-  // Create categories from folders if they don't exist
-  const getOrCreateCategory = db.transaction((folderName) => {
-    let category = db.prepare('SELECT id FROM categories WHERE user_id = ? AND name = ?').get(userId, folderName);
-    if (!category) {
-      const colors = ['#409EFF', '#67C23A', '#E6A23C', '#F56C6C', '#909399', '#9B59B6', '#1ABC9C', '#E74C3C'];
-      const color = colors[Math.floor(Math.random() * colors.length)];
-      const result = db.prepare('INSERT INTO categories (user_id, name, color) VALUES (?, ?, ?)').run(userId, folderName, color);
-      return result.lastInsertRowid;
+// POST /api/import/bookmarks - Import Chrome/Firefox bookmark HTML
+router.post('/bookmarks', (req, res) => {
+  upload.single('file')(req, res, (uploadErr) => {
+    if (uploadErr) {
+      // multer errors (file too large, wrong field, ...) must surface with
+      // an actionable message instead of a generic 500.
+      if (uploadErr.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: '文件超过 10MB 大小限制，请拆分后再导入' });
+      }
+      return res.status(400).json({ error: `文件上传失败：${uploadErr.message}` });
     }
-    return category.id;
-  });
 
-  const insertLink = db.prepare(
-    'INSERT INTO links (user_id, url, title, description, category_id, status) VALUES (?, ?, ?, ?, ?, ?)'
-  );
+    if (!req.file) {
+      return res.status(400).json({ error: '未收到上传文件，请先选择书签 HTML 文件' });
+    }
 
-  const checkExists = db.prepare('SELECT id FROM links WHERE user_id = ? AND url = ?');
+    const html = req.file.buffer.toString('utf-8');
+    const { items: bookmarks, failures: parseFailures } = parseBookmarks(html);
 
-  let imported = 0;
-  let skipped = 0;
+    if (bookmarks.length === 0 && parseFailures.length === 0) {
+      return res.status(400).json({ error: '文件中没有找到任何书签，请确认导出的是 Chrome/Firefox 书签 HTML 文件' });
+    }
 
-  const importBookmarks = db.transaction(() => {
-    for (const bookmark of bookmarks) {
-      // Skip if URL already exists for this user
-      const existing = checkExists.get(userId, bookmark.url);
+    // Assign a single 1-based position across every bookmark entry found
+    // in the file, ordered by document position — entries that failed to
+    // parse still get a position so the report can say "第 N 条".
+    const positioned = [
+      ...bookmarks.map((b) => ({ kind: 'bookmark', line: b.line, data: b })),
+      ...parseFailures.map((f) => ({ kind: 'failure', line: f.line, data: f })),
+    ].sort((a, b) => a.line - b.line);
+    positioned.forEach((entry, i) => {
+      entry.index = i + 1;
+    });
+
+    const db = getDb();
+    const userId = req.userId;
+
+    const findCategory = db.prepare(
+      'SELECT id FROM categories WHERE user_id = ? AND parent_id IS ? AND name = ?'
+    );
+    const insertCategory = db.prepare(
+      'INSERT INTO categories (user_id, name, color, parent_id) VALUES (?, ?, ?, ?)'
+    );
+    const findLinkByNormalized = db.prepare(
+      'SELECT id FROM links WHERE user_id = ? AND normalized_url = ?'
+    );
+    const insertLink = db.prepare(
+      'INSERT INTO links (user_id, url, normalized_url, title, description, category_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    );
+
+    // Ensure a folder chain exists; categories are unique per
+    // (user, parent folder, name) so same-named subfolders under different
+    // parents stay distinct and the hierarchy is preserved.
+    const categoryCache = new Map(); // "parentId::name" -> id
+    function resolveCategory(folderPath) {
+      let parentId = null;
+      folderPath.forEach((name) => {
+        const key = `${parentId}::${name}`;
+        let id = categoryCache.get(key);
+        if (id === undefined) {
+          const existing = findCategory.get(userId, parentId, name);
+          if (existing) {
+            id = existing.id;
+          } else {
+            const color = FALLBACK_COLORS[Math.floor(Math.random() * FALLBACK_COLORS.length)];
+            id = Number(insertCategory.run(userId, name, color, parentId).lastInsertRowid);
+          }
+          categoryCache.set(key, id);
+        }
+        parentId = id;
+      });
+      return parentId;
+    }
+
+    // Normalized URLs already handled during this very request (file may
+    // contain the same link twice).
+    const seenInRequest = new Set();
+
+    // Create every folder chain up front in one transaction. This keeps
+    // the category cache stable while link inserts run in their own
+    // independent transactions below.
+    const ensureCategories = db.transaction(() => {
+      for (const bookmark of bookmarks) {
+        if (bookmark.folderPath && bookmark.folderPath.length > 0) {
+          resolveCategory(bookmark.folderPath);
+        }
+      }
+    });
+    ensureCategories();
+
+    const imported = [];
+    const skipped = [];
+    const failures = positioned
+      .filter((e) => e.kind === 'failure')
+      .map((e) => ({
+        index: e.index,
+        line: e.data.line,
+        title: e.data.title || '',
+        url: e.data.rawUrl || '',
+        reason: e.data.reason,
+        stage: 'parse',
+      }));
+
+    // One savepoint per bookmark so a failing row never rolls back rows
+    // that already succeeded.
+    const processOne = db.transaction((entry) => {
+      const bookmark = entry.data;
+      const result = { index: entry.index, title: bookmark.title, url: bookmark.rawUrl };
+
+      if (seenInRequest.has(bookmark.url)) {
+        skipped.push({ ...result, reason: '与本文件前面的书签重复' });
+        return;
+      }
+      seenInRequest.add(bookmark.url);
+
+      const existing = findLinkByNormalized.get(userId, bookmark.url);
       if (existing) {
-        skipped++;
-        continue;
+        skipped.push({ ...result, reason: '规范化后的网址已存在，跳过重复项' });
+        return;
       }
 
-      const categoryId = bookmark.folder !== 'Uncategorized' ? getOrCreateCategory(bookmark.folder) : null;
+      let categoryId = null;
+      if (bookmark.folderPath && bookmark.folderPath.length > 0) {
+        categoryId = resolveCategory(bookmark.folderPath);
+      }
 
-      insertLink.run(userId, bookmark.url, bookmark.title, '', categoryId, 'unchecked');
-      imported++;
-    }
-  });
+      try {
+        const info = insertLink.run(
+          userId,
+          bookmark.rawUrl,
+          bookmark.url,
+          bookmark.title,
+          '',
+          categoryId,
+          'unchecked'
+        );
+        imported.push({ ...result, id: Number(info.lastInsertRowid), categoryPath: bookmark.folderPath });
+      } catch (err) {
+        seenInRequest.delete(bookmark.url);
+        // UNIQUE constraint races / any other DB error: report, don't abort.
+        if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+          skipped.push({ ...result, reason: '规范化后的网址已存在，跳过重复项' });
+        } else {
+          failures.push({ index: entry.index, line: bookmark.line, title: bookmark.title, url: bookmark.rawUrl, reason: `写入数据库失败：${err.message}`, stage: 'insert' });
+        }
+      }
+    });
 
-  importBookmarks();
+    positioned
+      .filter((e) => e.kind === 'bookmark')
+      .forEach((entry) => {
+        try {
+          processOne(entry);
+        } catch (err) {
+          // Unexpected failure outside the per-row try/catch.
+          failures.push({
+            index: entry.index,
+            line: entry.data.line,
+            title: entry.data.title,
+            url: entry.data.rawUrl,
+            reason: `处理失败：${err.message}`,
+            stage: 'insert',
+          });
+        }
+      });
 
-  res.json({
-    message: `Successfully imported ${imported} bookmarks`,
-    imported,
-    skipped,
-    total: bookmarks.length,
+    // Counts are derived from the detail lists so the summary and the
+    // returned rows can never disagree.
+    const total = bookmarks.length + parseFailures.length;
+    res.json({
+      message: `解析 ${total} 条，导入 ${imported.length} 条，跳过 ${skipped.length} 条，失败 ${failures.length} 条`,
+      total,
+      imported_count: imported.length,
+      skipped_count: skipped.length,
+      failed_count: failures.length,
+      // Keep legacy field names for older clients.
+      imported: imported.length,
+      skipped: skipped.length,
+      failed: failures.length,
+      details: {
+        imported,
+        skipped,
+        failures,
+      },
+    });
   });
 });
 

@@ -1,7 +1,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 
-const DB_PATH = path.join(__dirname, '..', 'data', 'links.db');
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'links.db');
 
 let db;
 
@@ -31,13 +31,16 @@ function initDatabase() {
       user_id INTEGER NOT NULL,
       name TEXT NOT NULL,
       color TEXT DEFAULT '#409EFF',
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      parent_id INTEGER,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (parent_id) REFERENCES categories(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS links (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       url TEXT NOT NULL,
+      normalized_url TEXT,
       title TEXT NOT NULL,
       description TEXT DEFAULT '',
       category_id INTEGER,
