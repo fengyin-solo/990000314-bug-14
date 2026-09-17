@@ -1,6 +1,7 @@
 const express = require('express');
 const { getDb } = require('../db/init');
 const { authMiddleware } = require('../middleware/auth');
+const { normalizeUrl } = require('../utils/url');
 
 const router = express.Router();
 
@@ -78,11 +79,23 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: 'URL and title are required' });
   }
 
+  const normalized = normalizeUrl(url);
+  if (!normalized.ok) {
+    return res.status(400).json({ error: normalized.reason });
+  }
+
   const db = getDb();
 
+  const duplicate = db.prepare(
+    'SELECT id FROM links WHERE user_id = ? AND normalized_url = ?'
+  ).get(userId, normalized.normalized);
+  if (duplicate) {
+    return res.status(409).json({ error: '该地址已在链接库中（按规范化地址判定重复）' });
+  }
+
   const result = db.prepare(
-    'INSERT INTO links (user_id, url, title, description, category_id, status, is_read_later, review_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(userId, url, title, description || '', category_id || null, 'unchecked', is_read_later ? 1 : 0, review_date || null);
+    'INSERT INTO links (user_id, url, normalized_url, title, description, category_id, status, is_read_later, review_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(userId, url, normalized.normalized, title, description || '', category_id || null, 'unchecked', is_read_later ? 1 : 0, review_date || null);
 
   const linkId = result.lastInsertRowid;
 
@@ -310,15 +323,29 @@ router.put('/:id', (req, res) => {
     return res.status(404).json({ error: 'Link not found' });
   }
 
+  const nextUrl = url || link.url;
+  const normalized = normalizeUrl(nextUrl);
+  if (!normalized.ok) {
+    return res.status(400).json({ error: normalized.reason });
+  }
+
+  const duplicate = db.prepare(
+    'SELECT id FROM links WHERE user_id = ? AND normalized_url = ? AND id != ?'
+  ).get(userId, normalized.normalized, id);
+  if (duplicate) {
+    return res.status(409).json({ error: '该地址与已有链接重复（按规范化地址判定）' });
+  }
+
   // Update link
   db.prepare(`
     UPDATE links
-    SET url = ?, title = ?, description = ?, category_id = ?, is_read_later = ?, review_date = ?, review_status = ?
+    SET url = ?, normalized_url = ?, title = ?, description = ?, category_id = ?, is_read_later = ?, review_date = ?, review_status = ?
     WHERE id = ?
   `).run(
-    url || link.url, 
-    title || link.title, 
-    description ?? link.description, 
+    nextUrl,
+    normalized.normalized,
+    title || link.title,
+    description ?? link.description,
     category_id ?? link.category_id,
     is_read_later !== undefined ? (is_read_later ? 1 : 0) : link.is_read_later,
     review_date !== undefined ? review_date : link.review_date,

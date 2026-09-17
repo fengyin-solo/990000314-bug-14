@@ -51,6 +51,7 @@ export const linksApi = {
 // Categories API
 export const categoriesApi = {
   getCategories: () => api.get('/categories'),
+  getCategoryTree: () => api.get('/categories/tree'),
   createCategory: (data) => api.post('/categories', data),
   updateCategory: (id, data) => api.put(`/categories/${id}`, data),
   deleteCategory: (id) => api.delete(`/categories/${id}`),

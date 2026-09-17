@@ -1,7 +1,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 
-const DB_PATH = path.join(__dirname, '..', 'data', 'links.db');
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'links.db');
 
 let db;
 
@@ -31,13 +31,16 @@ function initDatabase() {
       user_id INTEGER NOT NULL,
       name TEXT NOT NULL,
       color TEXT DEFAULT '#409EFF',
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      parent_id INTEGER,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (parent_id) REFERENCES categories(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS links (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       url TEXT NOT NULL,
+      normalized_url TEXT,
       title TEXT NOT NULL,
       description TEXT DEFAULT '',
       category_id INTEGER,
@@ -63,6 +66,8 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_link_tags_link_id ON link_tags(link_id);
     CREATE INDEX IF NOT EXISTS idx_link_tags_tag ON link_tags(tag);
     CREATE INDEX IF NOT EXISTS idx_categories_user_id ON categories(user_id);
+    -- idx_links_user_normalized_url and idx_categories_parent_id are created
+    -- by migrate.js, because pre-existing databases gain those columns there.
   `);
 
   return db;

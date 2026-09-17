@@ -27,16 +27,16 @@
       <el-form-item label="分类">
         <el-select v-model="form.category_id" placeholder="选择分类" clearable style="width: 100%">
           <el-option
-            v-for="cat in linksStore.categories"
+            v-for="cat in linksStore.flatCategoryTree"
             :key="cat.id"
-            :label="cat.name"
+            :label="cat.fullName"
             :value="cat.id"
           >
-            <span>
+            <span :style="{ paddingLeft: cat.depth * 14 + 'px' }">
               <el-tag :color="cat.color" effect="dark" size="small" style="margin-right: 8px">
                 &nbsp;
               </el-tag>
-              {{ cat.name }}
+              {{ cat.fullName }}
             </span>
           </el-option>
         </el-select>

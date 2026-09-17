@@ -4,7 +4,7 @@
       <template #header>
         <div class="sidebar-header">
           <h3>分类</h3>
-          <el-button text size="small" @click="showAddCategory">
+          <el-button text size="small" @click="openAdd(null)">
             <el-icon><Plus /></el-icon>
           </el-button>
         </div>
@@ -20,33 +20,21 @@
           <span class="category-count">{{ linksStore.total }}</span>
         </div>
 
-        <div
-          v-for="cat in linksStore.categories"
+        <CategoryNode
+          v-for="cat in linksStore.categoryTree"
           :key="cat.id"
-          class="category-item"
-          :class="{ active: linksStore.selectedCategory === cat.id }"
-          @click="linksStore.setCategory(cat.id)"
-        >
-          <span class="category-color" :style="{ backgroundColor: cat.color }"></span>
-          <span class="category-name">{{ cat.name }}</span>
-          <span class="category-count">{{ cat.link_count }}</span>
-          <el-dropdown trigger="click" @command="(cmd) => handleCategoryCommand(cmd, cat)" @click.stop>
-            <el-button text size="small" class="category-more" @click.stop>
-              <el-icon><MoreFilled /></el-icon>
-            </el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="edit">编辑</el-dropdown-item>
-                <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
-        </div>
+          :category="cat"
+          :depth="0"
+          @command="handleCategoryCommand"
+        />
       </div>
     </el-card>
 
-    <el-dialog v-model="categoryDialogVisible" :title="editingCategory ? '编辑分类' : '添加分类'" width="360px">
-      <el-form :model="categoryForm" label-width="60px">
+    <el-dialog v-model="categoryDialogVisible" :title="dialogTitle" width="360px">
+      <el-form :model="categoryForm" label-width="72px">
+        <el-form-item v-if="parentCategory" label="上级分类">
+          <el-tag type="info">{{ parentCategory.name }}</el-tag>
+        </el-form-item>
         <el-form-item label="名称">
           <el-input v-model="categoryForm.name" placeholder="分类名称" />
         </el-form-item>
@@ -63,21 +51,29 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { useLinksStore } from '../stores/links'
+import CategoryNode from './CategoryNode.vue'
 
 const linksStore = useLinksStore()
 
 const categoryDialogVisible = ref(false)
 const editingCategory = ref(null)
+const parentCategory = ref(null)
 const categoryForm = reactive({
   name: '',
   color: '#409EFF',
 })
 
-function showAddCategory() {
+const dialogTitle = computed(() => {
+  if (editingCategory.value) return '编辑分类'
+  return parentCategory.value ? `在「${parentCategory.value.name}」下添加子分类` : '添加分类'
+})
+
+function openAdd(parent) {
   editingCategory.value = null
+  parentCategory.value = parent
   categoryForm.name = ''
   categoryForm.color = '#409EFF'
   categoryDialogVisible.value = true
@@ -86,9 +82,12 @@ function showAddCategory() {
 function handleCategoryCommand(command, category) {
   if (command === 'edit') {
     editingCategory.value = category
+    parentCategory.value = null
     categoryForm.name = category.name
     categoryForm.color = category.color
     categoryDialogVisible.value = true
+  } else if (command === 'add-child') {
+    openAdd(category)
   } else if (command === 'delete') {
     handleDeleteCategory(category)
   }
@@ -102,28 +101,37 @@ async function saveCategory() {
 
   try {
     if (editingCategory.value) {
-      await linksStore.updateCategory(editingCategory.value.id, categoryForm)
+      await linksStore.updateCategory(editingCategory.value.id, {
+        name: categoryForm.name,
+        color: categoryForm.color,
+      })
       ElMessage.success('更新成功')
     } else {
-      await linksStore.createCategory(categoryForm)
+      await linksStore.createCategory({
+        name: categoryForm.name,
+        color: categoryForm.color,
+        parent_id: parentCategory.value?.id || null,
+      })
       ElMessage.success('创建成功')
     }
     categoryDialogVisible.value = false
   } catch (err) {
-    ElMessage.error('操作失败')
+    ElMessage.error(err.response?.data?.error || '操作失败')
   }
 }
 
 async function handleDeleteCategory(category) {
   try {
-    await ElMessageBox.confirm(`确定要删除分类 "${category.name}" 吗？该分类下的链接不会被删除。`, '确认删除', {
-      type: 'warning',
-    })
+    await ElMessageBox.confirm(
+      `确定要删除分类 "${category.name}" 吗？子分类会保留并上移一层，该分类下的链接不会被删除。`,
+      '确认删除',
+      { type: 'warning' }
+    )
     await linksStore.deleteCategory(category.id)
     ElMessage.success('删除成功')
   } catch (err) {
     if (err !== 'cancel') {
-      ElMessage.error('删除失败')
+      ElMessage.error(err.response?.data?.error || '删除失败')
     }
   }
 }

@@ -20,6 +20,7 @@
           <li>选择 "导出书签"</li>
           <li>保存 HTML 文件后，上传到此处</li>
         </ol>
+        <p class="hint">Edge、Firefox 导出的 HTML 书签同样支持；文件夹层级会原样保留为分类，重复地址按规范化地址判定，重复导入只会补齐缺失的书签。</p>
       </div>
 
       <el-upload
@@ -36,7 +37,7 @@
           拖拽文件到此处，或 <em>点击上传</em>
         </div>
         <template #tip>
-          <div class="el-upload__tip">仅支持 Chrome 书签导出的 HTML 文件</div>
+          <div class="el-upload__tip">仅支持 Chrome / Edge / Firefox 导出的 HTML 书签文件，最大 10MB</div>
         </template>
       </el-upload>
 
@@ -47,29 +48,78 @@
         </el-button>
       </div>
 
-      <el-result
-        v-if="importResult"
-        :icon="importResult.imported > 0 ? 'success' : 'warning'"
-        :title="importResult.message"
-        :sub-title="`共解析 ${importResult.total} 条书签，导入 ${importResult.imported} 条，跳过 ${importResult.skipped} 条重复项`"
-      >
-        <template #extra>
-          <el-button type="primary" @click="$router.push('/')">查看链接</el-button>
-          <el-button @click="resetImport">继续导入</el-button>
-        </template>
-      </el-result>
+      <div v-if="importResult" class="result-block">
+        <el-result
+          :icon="resultIcon"
+          :title="importResult.message"
+          :sub-title="`文件解析 ${importResult.parsed + importResult.rejected} 条；新增 ${importResult.imported} 条，跳过 ${importResult.skipped} 条，失败 ${importResult.failed} 条（合计 ${importResult.total} 条）`"
+        >
+          <template #extra>
+            <el-button type="primary" @click="goHome">查看链接</el-button>
+            <el-button @click="resetImport">继续导入</el-button>
+          </template>
+        </el-result>
+
+        <el-tabs v-model="activeTab" class="detail-tabs">
+          <el-tab-pane name="failed">
+            <template #label>
+              失败明细 <el-badge :value="importResult.failed" :hidden="importResult.failed === 0" type="danger" />
+            </template>
+            <el-empty v-if="failedDetails.length === 0" description="没有失败的书签" :image-size="60" />
+            <el-table v-else :data="failedDetails" size="small" max-height="360">
+              <el-table-column label="第几条" prop="index" width="70" />
+              <el-table-column label="行号" prop="line" width="70" />
+              <el-table-column label="标题" prop="title" min-width="140" show-overflow-tooltip />
+              <el-table-column label="地址" prop="url" min-width="160" show-overflow-tooltip />
+              <el-table-column label="失败原因" prop="reason" min-width="200" show-overflow-tooltip />
+            </el-table>
+          </el-tab-pane>
+
+          <el-tab-pane name="all">
+            <template #label>全部明细 ({{ importResult.details.length }})</template>
+            <el-table :data="importResult.details" size="small" max-height="360">
+              <el-table-column label="#" prop="index" width="55" />
+              <el-table-column label="行号" prop="line" width="60" />
+              <el-table-column label="状态" width="90">
+                <template #default="{ row }">
+                  <el-tag v-if="row.status === 'imported'" type="success" size="small">已导入</el-tag>
+                  <el-tag v-else-if="row.status === 'skipped'" type="info" size="small">跳过</el-tag>
+                  <el-tag v-else type="danger" size="small">失败</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="标题" prop="title" min-width="130" show-overflow-tooltip />
+              <el-table-column label="分类路径" prop="category_path" min-width="130" show-overflow-tooltip />
+              <el-table-column label="说明 / 原因" prop="reason" min-width="180" show-overflow-tooltip />
+            </el-table>
+          </el-tab-pane>
+        </el-tabs>
+      </div>
     </el-card>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { importApi } from '../api'
 
+const router = useRouter()
 const selectedFile = ref(null)
 const importing = ref(false)
 const importResult = ref(null)
+const activeTab = ref('failed')
+
+const failedDetails = computed(() =>
+  (importResult.value?.details || []).filter((d) => d.status === 'failed')
+)
+
+const resultIcon = computed(() => {
+  if (!importResult.value) return 'info'
+  if (importResult.value.failed > 0 && importResult.value.imported === 0) return 'error'
+  if (importResult.value.failed > 0) return 'warning'
+  return 'success'
+})
 
 function handleFileChange(file) {
   selectedFile.value = file.raw
@@ -86,12 +136,22 @@ async function handleImport() {
   try {
     const response = await importApi.importBookmarks(selectedFile.value)
     importResult.value = response.data
-    ElMessage.success('导入成功')
+    activeTab.value = response.data.failed > 0 ? 'failed' : 'all'
+    if (response.data.imported > 0) {
+      ElMessage.success(`成功导入 ${response.data.imported} 条书签`)
+    }
+    if (response.data.failed > 0) {
+      ElMessage.warning(`${response.data.failed} 条书签导入失败，请查看失败明细`)
+    }
   } catch (err) {
-    ElMessage.error(err.response?.data?.error || '导入失败')
+    ElMessage.error(err.response?.data?.error || '导入失败，请检查文件格式后重试')
   } finally {
     importing.value = false
   }
+}
+
+function goHome() {
+  router.push('/')
 }
 
 function resetImport() {
@@ -102,7 +162,7 @@ function resetImport() {
 
 <style scoped>
 .import-container {
-  max-width: 700px;
+  max-width: 820px;
   margin: 40px auto;
   padding: 0 20px;
 }
@@ -138,6 +198,12 @@ function resetImport() {
   line-height: 1.8;
 }
 
+.hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: #909399;
+}
+
 .upload-area {
   margin-bottom: 20px;
 }
@@ -150,5 +216,13 @@ function resetImport() {
 .file-name {
   margin-bottom: 12px;
   color: #606266;
+}
+
+.result-block {
+  margin-top: 8px;
+}
+
+.detail-tabs {
+  margin-top: -10px;
 }
 </style>

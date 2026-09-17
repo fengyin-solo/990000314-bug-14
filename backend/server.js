@@ -37,7 +37,7 @@ app.get('/api/ping', (req, res) => {
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).json({ error: 'Something went wrong!' });
+  res.status(500).json({ error: `服务器内部错误: ${err.message || '未知错误'}` });
 });
 
 app.listen(PORT, () => {

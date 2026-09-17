@@ -1,10 +1,11 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { linksApi, categoriesApi, tagsApi } from '../api'
 
 export const useLinksStore = defineStore('links', () => {
   const links = ref([])
   const categories = ref([])
+  const categoryTree = ref([])
   const tags = ref([])
   const total = ref(0)
   const currentPage = ref(1)
@@ -42,12 +43,30 @@ export const useLinksStore = defineStore('links', () => {
 
   async function fetchCategories() {
     try {
-      const response = await categoriesApi.getCategories()
-      categories.value = response.data
+      const [flat, tree] = await Promise.all([
+        categoriesApi.getCategories(),
+        categoriesApi.getCategoryTree(),
+      ])
+      categories.value = flat.data
+      categoryTree.value = tree.data
     } catch (error) {
       console.error('Failed to fetch categories:', error)
     }
   }
+
+  // Flatten the tree into a list with depth + full path labels for selects/tree views.
+  const flatCategoryTree = computed(() => {
+    const result = []
+    const walk = (nodes, depth, path) => {
+      nodes.forEach((node) => {
+        const currentPath = [...path, node.name]
+        result.push({ ...node, depth, fullName: currentPath.join(' / ') })
+        walk(node.children || [], depth + 1, currentPath)
+      })
+    }
+    walk(categoryTree.value, 0, [])
+    return result
+  })
 
   async function fetchTags() {
     try {
@@ -129,6 +148,8 @@ export const useLinksStore = defineStore('links', () => {
   return {
     links,
     categories,
+    categoryTree,
+    flatCategoryTree,
     tags,
     total,
     currentPage,
